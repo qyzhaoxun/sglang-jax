@@ -282,4 +282,34 @@ class ForwardBatch:
             attn_backend=model_runner.attn_backend,
         )
 
+        # Debug: decode 批的关键张量头部
+        try:
+            if obj.forward_mode.is_decode():
+                logger.info(
+                    "[FB] decode positions_head=%s seq_lens_head=%s out_cache_loc_head=%s",
+                    (
+                        positions[:4].tolist()
+                        if positions is not None
+                        and hasattr(positions, "size")
+                        and positions.size > 0
+                        else []
+                    ),
+                    (
+                        seq_lens[:4].tolist()
+                        if seq_lens is not None
+                        and hasattr(seq_lens, "size")
+                        and seq_lens.size > 0
+                        else []
+                    ),
+                    (
+                        out_cache_loc[:4].tolist()
+                        if out_cache_loc is not None
+                        and hasattr(out_cache_loc, "size")
+                        and out_cache_loc.size > 0
+                        else []
+                    ),
+                )
+        except Exception:
+            pass
+
         return obj

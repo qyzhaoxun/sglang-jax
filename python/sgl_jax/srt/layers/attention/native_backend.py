@@ -13,6 +13,12 @@ from sgl_jax.srt.model_executor.forward_batch_info import ForwardBatch, ForwardM
 from sgl_jax.srt.utils.jax_utils import is_tpu_runtime
 
 
+@jax.jit
+def _kv_layer_sum(buf: jax.Array) -> jax.Array:
+    # Per-layer KV (fused) checksum (or replace with sum(abs(buf)))
+    return jnp.sum(buf)
+
+
 @register_pytree_node_class
 class NativeAttention(AttentionBackend):
     """Native Attention layer for variable-length sequences using ForwardBatch."""
@@ -105,6 +111,8 @@ class NativeAttention(AttentionBackend):
         Get the kv cache from the forward batch.
         """
         layer_idx = layer_id - forward_batch.token_to_kv_pool.start_layer
+        before_sum = _kv_layer_sum(forward_batch.token_to_kv_pool.kv_buffer[layer_idx])
+        jax.debug.print("[KV-LEG:BEFORE] layer={} kv_sum={}", layer_id, before_sum)
 
         if is_tpu_runtime():
             if forward_batch.forward_mode == ForwardMode.EXTEND:
@@ -120,6 +128,34 @@ class NativeAttention(AttentionBackend):
             k, v = fused_layer[:, ::2, :], fused_layer[:, 1::2, :]
             fused_return = fused_layer
         else:
+            try:
+                loc = forward_batch.out_cache_loc
+                lmin = jnp.min(loc) if loc.size > 0 else jnp.array(-1, jnp.int32)
+                lmax = jnp.max(loc) if loc.size > 0 else jnp.array(-1, jnp.int32)
+                loc_len = loc.shape[0]
+                # Avoid dynamic arange: use fixed 128 with safe indexing
+                idx128 = jnp.arange(128, dtype=jnp.int32)
+                valid128 = idx128 < loc_len
+                safe_idx128 = jnp.where(valid128, idx128, 0)
+                loc_head128 = jnp.take(loc, safe_idx128) if loc_len > 0 else loc
+                neg_cnt = jnp.sum(loc < 0)
+                zero_cnt = jnp.sum(loc == 0)
+                jax.debug.print(
+                    "[KV-PATH] [KV-WRITE] NATIVE set_kv_buffer_legacy mode={m} layer={ly} loc={loc} loc_min={lmin} loc_max={lmax} neg_cnt={neg} zero_cnt={z} loc_len={ln} loc_head128={lh} k_shape={ks} v_shape={vs}",
+                    m=int(forward_batch.forward_mode),
+                    ly=layer_id,
+                    loc=loc,
+                    lmin=lmin,
+                    lmax=lmax,
+                    neg=neg_cnt,
+                    z=zero_cnt,
+                    ln=loc_len,
+                    lh=loc_head128,
+                    ks=k.shape,
+                    vs=v.shape,
+                )
+            except Exception:
+                pass
             updated_layer = forward_batch.token_to_kv_pool.set_kv_buffer_legacy(
                 layer_id, forward_batch.out_cache_loc, k, v
             )
@@ -172,6 +208,59 @@ def forward_attention(
     Returns:
         Output tensor of shape[batch_size, hidden_size]
     """
+    # [FA-ARGS] Consolidated arg diagnostics: full loc/seq/extend and shapes/dtypes/modes
+    ep = (
+        extend_prefix_lens
+        if extend_prefix_lens is not None
+        else jnp.array([], dtype=jnp.int32)
+    )
+    es = (
+        extend_seq_lens
+        if extend_seq_lens is not None
+        else jnp.array([], dtype=jnp.int32)
+    )
+
+    loc_len = loc.shape[0]
+    # Avoid dynamic arange: use fixed 128 with safe indexing
+    idx128 = jnp.arange(128, dtype=jnp.int32)
+    valid128 = idx128 < loc_len
+    safe_idx128 = jnp.where(valid128, idx128, 0)
+    loc_head128 = jnp.take(loc, safe_idx128) if loc_len > 0 else loc
+    neg_cnt = jnp.sum(loc < 0)
+    zero_cnt = jnp.sum(loc == 0)
+    nonzero_mask = loc != 0
+    any_nz = jnp.any(nonzero_mask)
+    # Tail zero segment start: equals the number of non-zero elements (assume tail is all zeros)
+    tail_zero_start = jnp.where(
+        any_nz,
+        jnp.sum(nonzero_mask.astype(jnp.int32)),
+        jnp.array(0, jnp.int32),
+    )
+    tail_zero_len = jnp.maximum(0, loc_len - tail_zero_start)
+
+    jax.debug.print(
+        "[FA-ARGS] mode={md} is_causal={ic} | q.shape={qs} k.shape={ks} v.shape={vs} | heads=(q={nh},kv={nkv}) | seq_lengths(len={slen})={sl} sum={ss} | loc(len={llen}) head128={lh} neg_cnt={neg} zero_cnt={z} tail_zero_start={ts} tail_zero_len={tl} | extend_prefix_lens(len={eplen})={epv} | extend_seq_lens(len={eslen})={esv}",
+        md=jnp.asarray(mode, jnp.int32),
+        ic=is_causal,
+        qs=q.shape,
+        ks=k_cache.shape,
+        vs=v_cache.shape,
+        nh=num_heads,
+        nkv=num_kv_heads,
+        sl=seq_lengths,
+        slen=seq_lengths.shape[0],
+        ss=jnp.sum(seq_lengths),
+        llen=loc_len,
+        lh=loc_head128,
+        neg=neg_cnt,
+        z=zero_cnt,
+        ts=tail_zero_start,
+        tl=tail_zero_len,
+        epv=ep,
+        eplen=ep.shape[0],
+        esv=es,
+        eslen=es.shape[0],
+    )
 
     cache_size = k_cache.shape[0]
     safe_loc = jnp.where(loc > 0, loc, cache_size)
@@ -219,6 +308,14 @@ def forward_attention(
     is_valid = loc > 0
     attn_logits = jnp.where(is_valid[jnp.newaxis, jnp.newaxis, :], attn_logits, neg_inf)
 
+    key_valid_from_loc = (loc >= 1) & (loc < cache_size)
+    jax.debug.print(
+        "[CHK] mode={} K_from_loc={} K_from_seq_lengths={}",
+        mode,
+        key_valid_from_loc.sum(),
+        jnp.sum(seq_lengths),
+    )
+
     if mode == ForwardMode.EXTEND:
         attn_logits = _apply_extend_mask(
             attn_logits, seq_lengths, extend_prefix_lens, extend_seq_lens, is_causal
@@ -228,6 +325,8 @@ def forward_attention(
 
     # Softmax
     attn_weights = jax.nn.softmax(attn_logits, axis=-1)
+    # Debug: whether NaNs appear after softmax
+    jax.debug.print("[Attn] softmax_finite={f}", f=jnp.isfinite(attn_weights).all())
 
     attn_output = jnp.matmul(attn_weights, v_t)
     attn_output = jnp.transpose(attn_output, (1, 0, 2))

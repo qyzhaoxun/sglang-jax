@@ -952,6 +952,17 @@ class ScheduleBatch:
             (self.req_pool_indices, locs), self.out_cache_loc.astype(np.int32)
         )
 
+        # Debug: decode 准备阶段的序列长度推进与 out_cache_loc 头部
+        try:
+            logger.info(
+                "[DecodePrep] seq_lens_old_head=%s seq_lens_new_head=%s out_cache_loc_head=%s",
+                locs[:4].tolist() if len(locs) > 0 else [],
+                self.seq_lens[:4].tolist() if len(self.seq_lens) > 0 else [],
+                self.out_cache_loc[:4].tolist() if len(self.out_cache_loc) > 0 else [],
+            )
+        except Exception:
+            pass
+
     def filter_batch(
         self,
         chunked_req_to_exclude: Optional[Union[Req, List[Req]]] = None,

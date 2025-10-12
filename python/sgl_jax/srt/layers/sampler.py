@@ -22,6 +22,16 @@ class Sampler(nnx.Module):
         logits, _, _, _ = operands
         batch_next_token_ids = jnp.argmax(logits, -1).flatten()
         logprobs = jax.nn.log_softmax(logits, axis=-1)
+        # Debug: Print argmax and logits range (avoid triggering GPU sort kernels)
+        max_idx = jnp.argmax(logits, axis=-1)
+        max_val = jnp.max(logits, axis=-1)
+        jax.debug.print(
+            "[Greedy] argmax idx={idx} val={val} logits max={mx} min={mn}",
+            idx=max_idx[:1],
+            val=max_val[:1],
+            mx=jnp.nanmax(logits),
+            mn=jnp.nanmin(logits),
+        )
         return batch_next_token_ids, logprobs
 
     def _regular_sampling(self, operands):
@@ -32,8 +42,28 @@ class Sampler(nnx.Module):
         processed_logits = jnp.divide(logits, sampling_metadata.temperatures).astype(
             logits.dtype
         )
+        # Debug: Check numeric health
+        any_nan = jnp.isnan(processed_logits).any()
+        any_inf = jnp.isinf(processed_logits).any()
+        max_v = jnp.nanmax(processed_logits)
+        min_v = jnp.nanmin(processed_logits)
+        jax.debug.print(
+            "[Sampler] logits nan={nan} inf={inf} max={mx} min={mn}",
+            nan=any_nan,
+            inf=any_inf,
+            mx=max_v,
+            mn=min_v,
+        )
 
         probs = jax.nn.softmax(processed_logits, axis=-1)
+        # Debug: Check softmax output quality
+        row_sum = probs.sum(axis=-1)
+        any_prob_nan = jnp.isnan(probs).any()
+        jax.debug.print(
+            "[Sampler] probs nan={pnan} sum_first={s}",
+            pnan=any_prob_nan,
+            s=row_sum[:1],
+        )
 
         batch_next_token_ids = top_k_top_p_min_p_sampling_from_probs_jax(
             probs,
@@ -113,6 +143,10 @@ class Sampler(nnx.Module):
             sampling_metadata,
             batch_next_token_ids,
             logprobs,
+        )
+        # Debug: print sampled next token ids
+        jax.debug.print(
+            "[Sampler] next_token_ids (batch) = {ids}", ids=batch_next_token_ids
         )
         lax.cond(
             sampling_metadata.return_logprob,

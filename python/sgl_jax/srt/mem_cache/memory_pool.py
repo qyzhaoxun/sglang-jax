@@ -453,6 +453,20 @@ class MHATokenToKVPool(KVCache):
         updated_layer = (
             self.kv_buffer[layer_idx].at[safe_loc].set(fused_kv, mode="drop")
         )
+        jax.debug.print(
+            "[KV-LEGACY-DIAG-JIT] layer={ly} cache_len={cl} loc_min={lmin} loc_max={lmax} loc={loc} k_fin={kf} k_shape={ks} v_fin={vf} v_shape={vs} fused_kv_shape={fkvs} N={N}",
+            ly=layer_id,
+            cl=self.kv_buffer[layer_idx].shape[0],
+            lmin=(jnp.min(loc) if loc.size > 0 else jnp.array(-1, jnp.int32)),
+            lmax=(jnp.max(loc) if loc.size > 0 else jnp.array(-1, jnp.int32)),
+            loc=loc,
+            kf=jnp.isfinite(cache_k).all(),
+            ks=cache_k.shape,
+            vf=jnp.isfinite(cache_v).all(),
+            vs=cache_v.shape,
+            fkvs=fused_kv.shape,
+            N=N,
+        )
         return updated_layer
 
 

@@ -120,6 +120,31 @@ class QWen3Attention(nnx.Module):
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
+        # 诊断：投影后统计（不改变行为）
+        try:
+            q_fin = jnp.isfinite(q).all()
+            k_fin = jnp.isfinite(k).all()
+            v_fin = jnp.isfinite(v).all()
+            q_mean = jnp.nanmean(q).astype(jnp.float32)
+            q_std = jnp.nanstd(q).astype(jnp.float32)
+            k_mean = jnp.nanmean(k).astype(jnp.float32)
+            k_std = jnp.nanstd(k).astype(jnp.float32)
+            v_mean = jnp.nanmean(v).astype(jnp.float32)
+            v_std = jnp.nanstd(v).astype(jnp.float32)
+            jax.debug.print(
+                "[Qwen3Diag] proj finite(q,k,v)=({qf},{kf},{vf}) q_ms=({qm},{qs}) k_ms=({km},{ks}) v_ms=({vm},{vs})",
+                qf=q_fin,
+                kf=k_fin,
+                vf=v_fin,
+                qm=q_mean,
+                qs=q_std,
+                km=k_mean,
+                ks=k_std,
+                vm=v_mean,
+                vs=v_std,
+            )
+        except Exception:
+            pass
 
         q = q.reshape(-1, self.q_head_num, self.head_dim)
         k = k.reshape(-1, self.kv_head_num, self.head_dim)
@@ -127,6 +152,42 @@ class QWen3Attention(nnx.Module):
 
         q = self.q_norm(q)
         k = self.k_norm(k)
+
+        # 诊断：位置与 q/k 范数（不改变行为）
+        try:
+            pos_min = (
+                jnp.min(positions)
+                if hasattr(positions, "size") and positions.size > 0
+                else -1
+            )
+            pos_max = (
+                jnp.max(positions)
+                if hasattr(positions, "size") and positions.size > 0
+                else -1
+            )
+            qn = jnp.linalg.norm(q[:1]).astype(jnp.float32)
+            kn = jnp.linalg.norm(k[:1]).astype(jnp.float32)
+            qn_fin = jnp.isfinite(q).all()
+            kn_fin = jnp.isfinite(k).all()
+            qn_mean = jnp.nanmean(q).astype(jnp.float32)
+            qn_std = jnp.nanstd(q).astype(jnp.float32)
+            kn_mean = jnp.nanmean(k).astype(jnp.float32)
+            kn_std = jnp.nanstd(k).astype(jnp.float32)
+            jax.debug.print(
+                "[Qwen3] pos_min={pmin} pos_max={pmax} q_norm={qn} k_norm={kn} q_fin={qf} k_fin={kf} q_ms=({qm},{qs}) k_ms=({km},{ks})",
+                pmin=pos_min,
+                pmax=pos_max,
+                qn=qn,
+                kn=kn,
+                qf=qn_fin,
+                kf=kn_fin,
+                qm=qn_mean,
+                qs=qn_std,
+                km=kn_mean,
+                ks=kn_std,
+            )
+        except Exception:
+            pass
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output, kv_fused = self.attn(q, k, v, forward_batch=forward_batch)
@@ -368,6 +429,49 @@ class Qwen3ForCausalLM(nnx.Module):
 
         loader.load_weights_from_safetensors(weight_mappings)
         logger.info("Qwen3 weights loaded successfully!")
+
+        # 只读诊断：确认输出头与词嵌入、词表规模是否对齐
+        try:
+            tie = getattr(self.config.hf_config, "tie_word_embeddings", True)
+            embed_w = self.transformer.embed_tokens.embedding
+            lm_w = self.lm_head.embedding
+            import jax
+            import jax.numpy as jnp
+
+            e_mean = jnp.mean(embed_w)
+            e_std = jnp.std(embed_w)
+            e_fin = jnp.isfinite(embed_w).all()
+
+            l_mean = jnp.mean(lm_w)
+            l_std = jnp.std(lm_w)
+            l_fin = jnp.isfinite(lm_w).all()
+
+            logger.info(
+                "[LM-HEAD-DIAG] tie_word_embeddings=%s embed_shape=%s lm_head_shape=%s embed_ms=(%s,%s) lm_ms=(%s,%s) fin(embed,lm)=(%s,%s) model_vocab=%s",
+                tie,
+                tuple(embed_w.shape),
+                tuple(lm_w.shape),
+                str(e_mean),
+                str(e_std),
+                str(l_mean),
+                str(l_std),
+                bool(e_fin),
+                bool(l_fin),
+                getattr(self.config.hf_config, "vocab_size", None),
+            )
+        except Exception:
+            pass
+
+        # 若启用权重共享但未显式绑定，进行绑定（行为修正：与 HF 一致）
+        try:
+            if getattr(self.config.hf_config, "tie_word_embeddings", True):
+                # 让 lm_head 与 embed_tokens 实际共享同一权重存储
+                self.lm_head.embedding = self.transformer.embed_tokens.embedding
+                logger.info(
+                    "[LM-HEAD-TIE] lm_head shares weights with embed_tokens (tie_word_embeddings=True)"
+                )
+        except Exception:
+            pass
 
     def _create_qwen3_weight_mappings(self) -> dict:
         mappings = {

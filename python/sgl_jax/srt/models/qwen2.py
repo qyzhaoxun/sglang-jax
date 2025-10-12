@@ -1,4 +1,5 @@
 import logging
+from turtle import pos
 from typing import Any, Dict, Optional, Tuple
 
 import jax
@@ -152,12 +153,55 @@ class Qwen2Attention(nnx.Module):
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
+        # F: 投影后数值健康性
+        try:
+            jax.debug.print(
+                "[Qwen2Attn][L={ly}] proj q_fin={qf} k_fin={kf} v_fin={vf} q_ms=({qm},{qs}) k_ms=({km},{ks}) v_ms=({vm},{vs}) h_shape={hshape} h_fin={hf} h_ms=({hm},{hs}) pos_shape={pshape} pos=({pos})",
+                ly=self.layer_id,
+                qf=jnp.isfinite(q).all(),
+                kf=jnp.isfinite(k).all(),
+                vf=jnp.isfinite(v).all(),
+                qm=jnp.nanmean(q).astype(jnp.float32),
+                qs=jnp.nanstd(q).astype(jnp.float32),
+                km=jnp.nanmean(k).astype(jnp.float32),
+                ks=jnp.nanstd(k).astype(jnp.float32),
+                vm=jnp.nanmean(v).astype(jnp.float32),
+                vs=jnp.nanstd(v).astype(jnp.float32),
+                hshape=hidden_states.shape,
+                hf=jnp.isfinite(hidden_states).all(),
+                hm=jnp.nanmean(hidden_states).astype(jnp.float32),
+                hs=jnp.nanstd(hidden_states).astype(jnp.float32),
+                pshape=positions.shape,
+                pos=positions,
+            )
+        except Exception:
+            pass
 
         q = q.reshape(-1, self.q_head_num, self.head_dim)
         k = k.reshape(-1, self.kv_head_num, self.head_dim)
         v = v.reshape(-1, self.kv_head_num, self.head_dim)
+        try:
+            jax.debug.print(
+                "[Qwen2Attn][L={ly}] after_reshape q_fin={qf} k_fin={kf} v_fin={vf}",
+                ly=self.layer_id,
+                qf=jnp.isfinite(q).all(),
+                kf=jnp.isfinite(k).all(),
+                vf=jnp.isfinite(v).all(),
+            )
+        except Exception:
+            pass
 
         q, k = self.rotary_emb(positions, q, k)
+        # H: RoPE 之后
+        try:
+            jax.debug.print(
+                "[Qwen2Attn][L={ly}] after_rope q_fin={qf} k_fin={kf}",
+                ly=self.layer_id,
+                qf=jnp.isfinite(q).all(),
+                kf=jnp.isfinite(k).all(),
+            )
+        except Exception:
+            pass
         attn_output, kv_fused = self.attn(q, k, v, forward_batch=forward_batch)
 
         output, _ = self.o_proj(attn_output)
@@ -221,6 +265,17 @@ class Qwen2DecoderLayer(nnx.Module):
         residual: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         layer_callback_flag = []
+        # A: 进入层时
+        try:
+            jax.debug.print(
+                "[Qwen2Layer][L={ly}] enter finite={f} mean={m} std={s}",
+                ly=self.layer_id,
+                f=jnp.isfinite(hidden_states).all(),
+                m=jnp.nanmean(hidden_states).astype(jnp.float32),
+                s=jnp.nanstd(hidden_states).astype(jnp.float32),
+            )
+        except Exception:
+            pass
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -228,17 +283,61 @@ class Qwen2DecoderLayer(nnx.Module):
             hidden_states += residual
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+        # B: input_layernorm 之后
+        try:
+            jax.debug.print(
+                "[Qwen2Layer][L={ly}] after_inln finite={f} mean={m} std={s}",
+                ly=self.layer_id,
+                f=jnp.isfinite(hidden_states).all(),
+                m=jnp.nanmean(hidden_states).astype(jnp.float32),
+                s=jnp.nanstd(hidden_states).astype(jnp.float32),
+            )
+        except Exception:
+            pass
 
         hidden_states, kv_fused = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
+        # C: self_attn 返回后
+        try:
+            jax.debug.print(
+                "[Qwen2Layer][L={ly}] after_attn finite={f} mean={m} std={s}",
+                ly=self.layer_id,
+                f=jnp.isfinite(hidden_states).all(),
+                m=jnp.nanmean(hidden_states).astype(jnp.float32),
+                s=jnp.nanstd(hidden_states).astype(jnp.float32),
+            )
+        except Exception:
+            pass
 
         hidden_states += residual
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        # D: post_attention_layernorm 之后
+        try:
+            jax.debug.print(
+                "[Qwen2Layer][L={ly}] after_postln finite={f} mean={m} std={s}",
+                ly=self.layer_id,
+                f=jnp.isfinite(hidden_states).all(),
+                m=jnp.nanmean(hidden_states).astype(jnp.float32),
+                s=jnp.nanstd(hidden_states).astype(jnp.float32),
+            )
+        except Exception:
+            pass
         hidden_states = self.mlp(hidden_states)
+        # E: mlp 之后
+        try:
+            jax.debug.print(
+                "[Qwen2Layer][L={ly}] after_mlp finite={f} mean={m} std={s}",
+                ly=self.layer_id,
+                f=jnp.isfinite(hidden_states).all(),
+                m=jnp.nanmean(hidden_states).astype(jnp.float32),
+                s=jnp.nanstd(hidden_states).astype(jnp.float32),
+            )
+        except Exception:
+            pass
 
         return hidden_states, residual, kv_fused, layer_callback_flag
 
@@ -282,6 +381,9 @@ class Qwen2Model(nnx.Module):
         forward_batch: ForwardBatch,
     ):
         residual = None
+        jax.debug.print(
+            "[QWen2] [EMB] input_ids={input_ids}", input_ids=forward_batch.input_ids
+        )
         hidden_states = self.embed_tokens(forward_batch.input_ids)
         layers_kv_fused = []
         layers_callback_flag = []

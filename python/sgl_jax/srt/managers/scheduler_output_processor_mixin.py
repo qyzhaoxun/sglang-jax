@@ -201,6 +201,16 @@ class SchedulerOutputProcessorMixin:
                 continue
 
             req.output_ids.append(next_token_id)
+            try:
+                logger.info(
+                    "[Scheduler] rid=%s step_token_id=%s out_len=%d finished=%s",
+                    req.rid,
+                    str(int(next_token_id)),
+                    len(req.output_ids),
+                    str(req.finished()),
+                )
+            except Exception:
+                pass
 
             req.check_finished()
             if req.finished():
@@ -599,6 +609,19 @@ class SchedulerOutputProcessorMixin:
 
         # Send to detokenizer
         if rids:
+            try:
+                logger.info(
+                    "[Scheduler->Detok] send batch rids=%s decode_ids_sizes=%s output_ids_batch=%s",
+                    rids,
+                    [len(x) if hasattr(x, "__len__") else -1 for x in decode_ids_list],
+                    (
+                        [len(x) if isinstance(x, list) else 0 for x in output_ids]
+                        if output_ids
+                        else []
+                    ),
+                )
+            except Exception:
+                pass
             out = BatchTokenIDOut(
                 rids,
                 finished_reasons,

@@ -354,6 +354,24 @@ class ModelRunner:
                     debug_mode=True,
                 )
 
+        # Host 侧容量对齐日志（只读诊断）
+        try:
+            kv_len0 = (
+                int(self.token_to_kv_pool.kv_buffer[0].shape[0])
+                if len(self.token_to_kv_pool.kv_buffer) > 0
+                else -1
+            )
+            logger.info(
+                "[KV-CAP] max_total_num_tokens=%s page_size=%s kv_size=%s kv_len0=%s alloc_size=%s",
+                self.max_total_num_tokens,
+                self.page_size,
+                getattr(self.token_to_kv_pool, "size", None),
+                kv_len0,
+                getattr(self.token_to_kv_pool_allocator, "size", None),
+            )
+        except Exception:
+            pass
+
     def init_attention_backend(self):
         """Init attention kernel backend."""
         self.attn_backend = self._get_attention_backend()
@@ -400,14 +418,71 @@ class ModelRunner:
                 forward_batch, logits_metadata
             )
             cache_miss_count = count()
+        # Debug: 前向后的关键信息
+        try:
+            logger.info(
+                "[RunModel] mode=%s seq_lens_head=%s out_cache_loc_head=%s logits_shape=%s",
+                str(forward_batch.forward_mode),
+                (
+                    forward_batch.seq_lens[:4].tolist()
+                    if hasattr(forward_batch.seq_lens, "tolist")
+                    else []
+                ),
+                (
+                    forward_batch.out_cache_loc[:4].tolist()
+                    if hasattr(forward_batch.out_cache_loc, "tolist")
+                    else []
+                ),
+                (getattr(output.next_token_logits, "shape", None)),
+            )
+        except Exception:
+            pass
+
         self._set_kv_cache_after_forward(layers_kv_fused, forward_batch)
 
         return output, cache_miss_count
 
     def _set_kv_cache_after_forward(self, layers_kv_fused, forward_batch: ForwardBatch):
+        # Always persist fused KV buffers returned by layers after forward
+
         start_idx = forward_batch.token_to_kv_pool.start_layer
         end_idx = start_idx + len(layers_kv_fused)
+        # 统一写回与对比日志
+        try:
+            before_shapes = [
+                tuple(forward_batch.token_to_kv_pool.kv_buffer[i].shape)
+                for i in range(start_idx, end_idx)
+            ][:2]
+            fused_shapes = [
+                tuple(arr.shape)
+                for arr in (
+                    layers_kv_fused[:2]
+                    if hasattr(layers_kv_fused, "__iter__")
+                    else [layers_kv_fused]
+                )
+            ]
+            logger.info(
+                "[KV-OVERWRITE] layers=[%s..%s) before_shapes(head)=%s fused_shapes(head)=%s",
+                start_idx,
+                end_idx,
+                before_shapes,
+                fused_shapes,
+            )
+        except Exception:
+            pass
+
         forward_batch.token_to_kv_pool.kv_buffer[start_idx:end_idx] = layers_kv_fused
+        try:
+            after_shapes = [
+                tuple(forward_batch.token_to_kv_pool.kv_buffer[i].shape)
+                for i in range(start_idx, end_idx)
+            ][:2]
+            logger.info(
+                "[KV-OVERWRITE] after_shapes(head)=%s",
+                after_shapes,
+            )
+        except Exception:
+            pass
 
     def forward_idle(
         self,

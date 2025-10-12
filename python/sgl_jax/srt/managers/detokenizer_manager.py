@@ -119,6 +119,17 @@ class DetokenizerManager:
 
     def handle_batch_token_id_out(self, recv_obj: BatchTokenIDOut):
         bs = len(recv_obj.rids)
+        try:
+            logger.info(
+                "[Detokenizer] recv rids=%s finished_flags=%s decode_ids_lens=%s read_offsets=%s output_ids_present=%s",
+                recv_obj.rids,
+                [fr is not None for fr in recv_obj.finished_reasons],
+                [len(x) if hasattr(x, "__len__") else -1 for x in recv_obj.decode_ids],
+                recv_obj.read_offsets,
+                recv_obj.output_ids is not None,
+            )
+        except Exception:
+            pass
 
         # Initialize decode status
         read_ids, surr_ids = [], []
@@ -265,7 +276,19 @@ class DetokenizerManager:
             incremental_output = output_str[s.sent_offset :]
             s.sent_offset = len(output_str)
             output_strs.append(incremental_output)
+
             output_ids_list.append(processed_new_token_ids)
+            try:
+                logger.info(
+                    "[Detokenizer] rid=%s incremental_len=%d total_len=%d finished=%s reason=%s",
+                    recv_obj.rids[i],
+                    len(incremental_output or ""),
+                    len(output_str),
+                    str(recv_obj.finished_reasons[i] is not None),
+                    str(recv_obj.finished_reasons[i]),
+                )
+            except Exception:
+                pass
 
         return BatchStrOut(
             rids=recv_obj.rids,
